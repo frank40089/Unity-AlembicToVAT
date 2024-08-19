@@ -57,8 +57,11 @@ To this UV2 you have to add to the X component the offset to go to the wanted fr
 What are the extra options?
 ---------------------------
 Store position in UV3 : This will store the pivot of the object in UV3, that way you can apply some common changes to whole sub-objects easily
+
 Exported from Blender : Meshes exported from Blender requires an extra transformation before being baked. You can try this option if you don't have the expected result
+
 Unlit Mesh : This will not export the normal map and will select an unlit material (in URP & HDRP). 
+
 Compress normal : This will store the normal in an R8G8B8A8 texture instead of a RGBA_Half which is using twice the amount of VRAM but have better accuracy
 
 Alembic samples provided in the project
