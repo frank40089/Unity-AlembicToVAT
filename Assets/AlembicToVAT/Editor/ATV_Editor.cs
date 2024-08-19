@@ -3,79 +3,160 @@ using UnityEditor;
 using System.Collections;
 using System.Collections.Generic;
 using Unity.EditorCoroutines.Editor;
+using UnityEngine.Formats.Alembic.Importer;
 
 public enum TopologyType
 {
 	Undefined,
+	Analysing,
 	Variable,
 	Fixed	
 }
 
 public class ATV_Editor : EditorWindow
 {  
-	public string ExportPath = "Assets/Export/";
-	public string ExportFilename = "AlembicVAT";
+	public string ExportPath = "Assets/ExportVAT/";
+    public bool NameFromAlembicPlayer = true;
+    public string ExportFilename = "AlembicVAT";
 	public float StartTime = 0.0f;
 	public float EndTime = 10.0f;
 	public float SampleRate = 24.0f;
-	public TopologyType VariableTopology = TopologyType.Undefined;
+	public bool StoreCenterPositionInUV3 = false;
+    public bool FromBlender = false;
+    public bool UnlitMesh = false;
+    public bool CompressNormal = false;
+    public TopologyType VariableTopology = TopologyType.Undefined;
+	private List<string> directoryList = new List<string>();
+	private int directoryIndex = 0;
+	private float progress = 0.0f;
 
-	public Transform MeshToBake;
-	public Material ReferenceMaterial;
+    public AlembicStreamPlayer AlembicPlayer;
+    public Shader ReferenceShader;
+    public Shader UnlitReferenceShader;
+
+    private Transform meshToBake;
 
     [MenuItem("Window/Alembic to VAT")]
-    public static void ShowWindow()
-    {
-        EditorWindow.GetWindow(typeof(ATV_Editor));
-    }
-    
-	public void Awake()
-    {
-		ReferenceMaterial = Resources.Load<Material>("VATMaterial");
+	public static void ShowWindow()
+	{
+		EditorWindow.GetWindow(typeof(ATV_Editor));
 	}
 
-    void OnGUI()
+
+    public void Awake()
+	{
+		ReferenceShader = Resources.Load<Shader>("VAT_SRP_Lit_Material");
+		UnlitReferenceShader = Resources.Load<Shader>("VAT_SRP_Unlit_Material");
+
+        if (ReferenceShader == null)
+            ReferenceShader = Resources.Load<Shader>("VAT_Legacy_Material");
+        if (UnlitReferenceShader == null)
+            UnlitReferenceShader = Resources.Load<Shader>("VAT_Legacy_Material");
+
+        directoryList.Clear();
+    }
+
+	void RefreshMenu()
     {
-        GUILayout.Label ("Source", EditorStyles.boldLabel);
+        var folders = AssetDatabase.GetSubFolders("Assets");
+        foreach (var folder in folders)
+        {
+            RecursiveSearchResources(folder);
+        }
+    }
+
+    void RecursiveSearchResources(string folder)
+    {
+        if (folder.ToLower().EndsWith("/resources"))
+		{
+			string modifiedFolder = folder.Replace('/', '\u2215');
+            directoryList.Add(modifiedFolder);
+        }
+        var folders = AssetDatabase.GetSubFolders(folder);
+        foreach (var fld in folders)
+        {
+            RecursiveSearchResources(fld);
+        }
+    }
+
+    void handleDirectoriesItemClicked(object obj)
+    {
+		Debug.Log("Selected: " + obj);
+    }
+
+
+void OnGUI()
+	{
+		GUILayout.Label ("Source", EditorStyles.boldLabel);
 		EditorGUI.BeginChangeCheck();
- 		MeshToBake = EditorGUILayout.ObjectField("Hierarchy to bake", MeshToBake, typeof(Transform), true) as Transform;
+		AlembicPlayer = EditorGUILayout.ObjectField("Alembic player", AlembicPlayer, typeof(AlembicStreamPlayer), true) as AlembicStreamPlayer;
 		if (EditorGUI.EndChangeCheck())
 		{
-			Debug.Log("Object to bake has changed ... updating data");
-			currentBaking = EditorCoroutineUtility.StartCoroutine(UpdateFromAlembic(), this);
-		}
-        GUILayout.Label ("Drop one object UNDER the Alembic player");
- 		ReferenceMaterial = EditorGUILayout.ObjectField("Reference material", ReferenceMaterial, typeof(Material), true) as Material;
-        GUILayout.Space(10);
-        GUILayout.Label ("Export", EditorStyles.boldLabel);
-        ExportPath = EditorGUILayout.TextField ("Export path", ExportPath);
-        ExportFilename = EditorGUILayout.TextField ("Export filename", ExportFilename);
-        GUILayout.Space(2);
-        GUILayout.Label ("Final path : "+ ExportPath + "Resources/"+ExportFilename+"_xxx.xxx");
-        GUILayout.Space(10);
-        GUILayout.Label ("Animation info", EditorStyles.boldLabel);
-		if (VariableTopology!=TopologyType.Undefined)
-		{
+            if (AlembicPlayer != null)
+			{
+                Debug.Log("Object to bake has changed ... updating data");
+                currentBaking = EditorCoroutineUtility.StartCoroutine(UpdateFromAlembic(), this);
+                if (NameFromAlembicPlayer)
+                    ExportFilename = AlembicPlayer.gameObject.name;
+            } else
+			{
+				if (currentBaking !=null)
+					EditorCoroutineUtility.StopCoroutine(currentBaking);
+                VariableTopology = TopologyType.Undefined;
+            }
+        }
+
+		GUILayout.Space(10);
+		GUILayout.Label ("Export", EditorStyles.boldLabel);
+
+		RefreshMenu();
+		directoryIndex = EditorGUILayout.Popup("Export path",directoryIndex, directoryList.ToArray());
+        ExportPath = directoryList[directoryIndex].Replace('\u2215', '/');
+
+        NameFromAlembicPlayer = EditorGUILayout.Toggle("Name from alembic player", NameFromAlembicPlayer);
+		ExportFilename = EditorGUILayout.TextField ("Export filename", ExportFilename);
+		GUILayout.Space(2);
+		GUILayout.Label ("Final path : "+ ExportPath + "/"+ExportFilename+"_xxx.xxx");
+		GUILayout.Space(10);
+		GUILayout.Label ("Animation info", EditorStyles.boldLabel);
+		if (VariableTopology!=TopologyType.Undefined && VariableTopology != TopologyType.Analysing)
+        {
 			StartTime = EditorGUILayout.FloatField("Start time", StartTime);
 			EndTime = EditorGUILayout.FloatField("End time", EndTime);
 			SampleRate = EditorGUILayout.FloatField("Sample rate", SampleRate);
-		}
-		switch (VariableTopology)
+			if (!float.IsFinite(SampleRate))
+				SampleRate = 60.0f;
+			StoreCenterPositionInUV3 = EditorGUILayout.Toggle("Store position in UV3", StoreCenterPositionInUV3);
+			FromBlender = EditorGUILayout.Toggle("Exported from Blender", FromBlender);
+            UnlitMesh = EditorGUILayout.Toggle("Unlit mesh", UnlitMesh);
+			if (!UnlitMesh)
+			{
+                CompressNormal = EditorGUILayout.Toggle("Compress normal", CompressNormal);
+            }
+            if (UnlitMesh)
+                UnlitReferenceShader = EditorGUILayout.ObjectField("Unlit reference shader", UnlitReferenceShader, typeof(Shader), true) as Shader;
+            else
+                ReferenceShader = EditorGUILayout.ObjectField("Lit reference shader", ReferenceShader, typeof(Shader), true) as Shader;
+        }
+        switch (VariableTopology)
 		{
-			case TopologyType.Undefined:
-		        GUILayout.Label ("Undefined topology");
-				break;
-			case TopologyType.Fixed:
-		        GUILayout.Label ("Fixed topology (morphing mesh)");
+            case TopologyType.Undefined:
+                GUILayout.Label("Undefined topology");
+                break;
+            case TopologyType.Analysing:
+                GUILayout.Label("Analysing topology ... please wait");
+                break;
+            case TopologyType.Fixed:
+				GUILayout.Label ("Fixed topology (morphing mesh)");
 				break;
 			case TopologyType.Variable:
-		        GUILayout.Label ("Variable topology (mesh sequence)");
+				GUILayout.Label ("Variable topology (mesh sequence)");
 				break;
 		}
-        GUILayout.Space(10);
+		GUILayout.Space(10);
 
-		if (VariableTopology!=TopologyType.Undefined)
-		{
+		if (VariableTopology!=TopologyType.Undefined && VariableTopology != TopologyType.Analysing)
+        {
 			if (bakingInProgress)
 			{
 				if (GUILayout.Button("Cancel bake"))
@@ -91,7 +172,7 @@ public class ATV_Editor : EditorWindow
 				}
 			}
 		}
-    }
+	}
 
 	SerializedProperty timeProp = null;
 	SerializedProperty startTimeProp = null;
@@ -105,32 +186,12 @@ public class ATV_Editor : EditorWindow
 
 	SerializedObject InitAlembic()
 	{
-		if (MeshToBake==null)
-		{
-			Debug.LogError("No mesh to bake!");
-			return null;
-		}
-
-		if (MeshToBake.parent==null)
-		{
-			Debug.LogError("Transform should be under an Alembic player");
-			return null;
-		}
-
-		GameObject parent = MeshToBake.parent.gameObject;
-		if (parent==null)
-		{
-			Debug.LogError("No parent!");
-			return null;
-		}
-
-        var alembicPlayer = parent.gameObject.GetComponent("AlembicStreamPlayer");
-		if (alembicPlayer == null)
+		if (AlembicPlayer == null)
 		{
 			Debug.LogError("Alembic player!");
 			return null;
 		}
-		alembicObject = new SerializedObject(alembicPlayer);
+		alembicObject = new SerializedObject(AlembicPlayer);
 
 		timeProp = alembicObject.FindProperty("currentTime");
 		startTimeProp = alembicObject.FindProperty("startTime");
@@ -142,16 +203,20 @@ public class ATV_Editor : EditorWindow
 	private void BakeMesh()
 	{
 		Debug.Log("Start baking mesh!");
-        currentBaking = EditorCoroutineUtility.StartCoroutine(ExportFrames(), this);
+		currentBaking = EditorCoroutineUtility.StartCoroutine(ExportFrames(), this);
 	}
 
 	IEnumerator UpdateFromAlembic()
 	{
 		Debug.Log("Get time from Alembic!");
-		VariableTopology = TopologyType.Undefined;
+        VariableTopology = TopologyType.Analysing;
+		progress = 0.0f;
 
-		SerializedObject alembic = InitAlembic();
-		if (alembic!=null)
+        SerializedObject alembic = InitAlembic();
+        MeshFilter meshFilter = AlembicPlayer.gameObject.GetComponentInChildren<MeshFilter>();
+		meshToBake = meshFilter.transform.parent;
+
+        if (alembic!=null)
 		{
 
 			maxTriangleCount=0;
@@ -163,15 +228,27 @@ public class ATV_Editor : EditorWindow
 
 				for(int frame = 0;frame<framesCount;frame++)
 				{
-					float timing = StartTime + ((float)frame)/SampleRate;
+                    progress = (float)frame / (float)framesCount;
+
+                    float timing = StartTime + ((float)frame)/SampleRate;
 					timeProp.floatValue = timing; 
 					alembicObject.ApplyModifiedProperties();
 					yield return null;
 
 					int triangleCount = 0;
-					for(int i=0;i<MeshToBake.childCount;i++)
+					for(int i=0;i< meshToBake.childCount;i++)
 					{
-						MeshFilter localMeshFilter = MeshToBake.GetChild(i).GetComponent<MeshFilter>();
+						MeshFilter localMeshFilter = meshToBake.GetChild(i).GetComponent<MeshFilter>();
+
+						if (localMeshFilter == null && meshToBake.GetChild(i).childCount>0)
+						{
+							localMeshFilter = meshToBake.GetChild(i).GetChild(0).GetComponent<MeshFilter>();
+							//if (localMeshFilter != null)
+							//	Debug.Log("Found a submesh at " + i);
+							//else
+							//	Debug.Log("Not found at " + i);
+						}
+
 						if (localMeshFilter != null)
 						{
 							triangleCount += localMeshFilter.sharedMesh.triangles.Length/3;
@@ -223,19 +300,19 @@ public class ATV_Editor : EditorWindow
 		return uv;
 	}
 
-	IEnumerator ExportFrames()
+    IEnumerator ExportFrames()
 	{
 		Mesh bakedMesh=null;
 		Vector3[] vertices;
 		Vector2[] uv;
+		Vector3[] uv3;
 		Vector3[] normals;
-		Vector4[] tangents;
 		Color[] colors;
 		int[] triangles;
 		int verticesCount = 0;
 		int trianglesIndexCount = 0;
 
-		string finalExportPath = ExportPath + "Resources/";
+		string finalExportPath = ExportPath + "/";
 
 		SerializedObject alembic = InitAlembic();
 
@@ -250,7 +327,7 @@ public class ATV_Editor : EditorWindow
 		verticesCount = 0;
 		trianglesIndexCount = 0;
 
-		if ((MeshToBake != null) && (MeshToBake.childCount!=0))
+		if ((meshToBake != null) && (meshToBake.childCount!=0))
 		{
 			bool hasNormal = false;
 			bool hasUVs = false;
@@ -264,9 +341,18 @@ public class ATV_Editor : EditorWindow
 			}
 			else
 			{
-				for(int i=0;i<MeshToBake.childCount;i++)
+				for(int i=0;i<meshToBake.childCount;i++)
 				{
-					MeshFilter localMeshFilter = MeshToBake.GetChild(i).GetComponent<MeshFilter>();
+					MeshFilter localMeshFilter = meshToBake.GetChild(i).GetComponent<MeshFilter>();
+
+					if (localMeshFilter == null && meshToBake.GetChild(i).childCount > 0)
+					{
+						localMeshFilter = meshToBake.GetChild(i).GetChild(0).GetComponent<MeshFilter>();
+						//if (localMeshFilter != null)
+						//    Debug.Log("Found a submesh at " + i);
+						//else
+						//    Debug.Log("Not found at " + i);
+					}
 
 					if (localMeshFilter != null)
 					{
@@ -282,6 +368,7 @@ public class ATV_Editor : EditorWindow
 
 			vertices = new Vector3[verticesCount];
 			uv = new Vector2[verticesCount];
+			uv3 = new Vector3[verticesCount];
 			normals = new Vector3[verticesCount];
 			colors = new Color[verticesCount];
 			triangles = new int[trianglesIndexCount];
@@ -300,12 +387,23 @@ public class ATV_Editor : EditorWindow
 			}
 			else
 			{
-				for(int i=0;i<MeshToBake.childCount;i++)
+				for(int i=0;i<meshToBake.childCount;i++)
 				{
-					MeshFilter localMeshFilter = MeshToBake.GetChild(i).GetComponent<MeshFilter>();
+					MeshFilter localMeshFilter = meshToBake.GetChild(i).GetComponent<MeshFilter>();
+
+					if (localMeshFilter == null && meshToBake.GetChild(i).childCount > 0)
+					{
+						localMeshFilter = meshToBake.GetChild(i).GetChild(0).GetComponent<MeshFilter>();
+						//if (localMeshFilter != null)
+						//    Debug.Log("Found a submesh at " + i);
+						//else
+						//    Debug.Log("Not found at " + i);
+					}
+
 					if (localMeshFilter != null)
 					{
-						float random = Random.value;				
+						Vector3 center = Vector3.zero;
+						
 						for(int j=0;j<localMeshFilter.sharedMesh.vertices.Length;j++)
 						{
 							if (hasUVs)
@@ -314,9 +412,20 @@ public class ATV_Editor : EditorWindow
 								colors[j + verticesOffset] = localMeshFilter.sharedMesh.colors[j];
 
 							vertices[j + verticesOffset] = localMeshFilter.sharedMesh.vertices[j];
+							center += localMeshFilter.sharedMesh.vertices[j];
 						}
 
-						for(int j=0;j<localMeshFilter.sharedMesh.triangles.Length;j++)
+						center /= (float)localMeshFilter.sharedMesh.vertices.Length;
+
+						if (StoreCenterPositionInUV3)
+						{
+							for (int j = 0; j < localMeshFilter.sharedMesh.vertices.Length; j++)
+							{
+								uv3[j + verticesOffset] = center;
+							}
+						}
+
+						for (int j=0;j<localMeshFilter.sharedMesh.triangles.Length;j++)
 						{
 							triangles[currentTrianglesIndex++] = localMeshFilter.sharedMesh.triangles[j] + verticesOffset;
 						}
@@ -334,6 +443,8 @@ public class ATV_Editor : EditorWindow
 			if (hasColors)
 				bakedMesh.colors = colors;
 			bakedMesh.triangles = triangles;
+			if (StoreCenterPositionInUV3)
+				bakedMesh.SetUVs(2,uv3);
 
 			int[] textureSize = {32,64,128,256,512,1024,2048,4096,8192,16384};
 			bakedMesh.RecalculateBounds();
@@ -385,7 +496,15 @@ public class ATV_Editor : EditorWindow
 				}
 			}
 
-			if (exportVAT)
+
+            Debug.Log("Delete older prefabs");
+			AssetDatabase.DeleteAsset(finalExportPath + ExportFilename + "_position.asset");
+			AssetDatabase.DeleteAsset(finalExportPath + ExportFilename + "_normal.asset");
+			AssetDatabase.DeleteAsset(finalExportPath + ExportFilename + "_mesh.asset");
+            AssetDatabase.DeleteAsset(finalExportPath + ExportFilename + "_material.mat");
+            AssetDatabase.DeleteAsset(finalExportPath + ExportFilename + "_prefab.prefab");
+
+            if (exportVAT)
 			{
 				Bounds newBounds = new Bounds();
 				Vector3 minBounds = new Vector3(1e9f, 1e9f, 1e9f);
@@ -395,16 +514,24 @@ public class ATV_Editor : EditorWindow
 
 				Debug.Log("Texture size : "+textureWidth+" x "+textureHeight+" Vertices : "+vertexCount+" Frames : "+framesCount);
 
-				Texture2D positionTexture= new Texture2D(textureWidth, textureHeight, TextureFormat.RGBAHalf, true, true);
+                Texture2D positionTexture = new Texture2D(textureWidth, textureHeight, TextureFormat.RGBAHalf, false, true);
 				if (VariableTopology == TopologyType.Variable)
 					positionTexture.filterMode = FilterMode.Point;
 				positionTexture.wrapMode = TextureWrapMode.Clamp;
-				Texture2D normalTexture= new Texture2D(textureWidth, textureHeight, TextureFormat.RGBAHalf, true, true);
-				if (VariableTopology == TopologyType.Variable) 
-					normalTexture.filterMode = FilterMode.Point;
-				normalTexture.wrapMode = TextureWrapMode.Clamp;
+				Texture2D normalTexture = null;
 
-				for(int frame = 0;frame<framesCount;frame++)
+				if (!UnlitMesh)
+				{
+					if (CompressNormal)
+                        normalTexture = new Texture2D(textureWidth, textureHeight, TextureFormat.RGBA32, false, true);
+                    else
+						normalTexture = new Texture2D(textureWidth, textureHeight, TextureFormat.RGBAHalf, false, true);
+                    if (VariableTopology == TopologyType.Variable)
+                        normalTexture.filterMode = FilterMode.Point;
+                    normalTexture.wrapMode = TextureWrapMode.Clamp;
+                }
+
+                for (int frame = 0;frame<framesCount;frame++)
 				{
 					float timing = StartTime + ((float)frame)/SampleRate;
 					Debug.Log("Encoding frame "+frame+" / "+framesCount+" ("+timing+")");
@@ -414,9 +541,18 @@ public class ATV_Editor : EditorWindow
 
 					if (VariableTopology == TopologyType.Variable)
 					{
-						Debug.Log("Doing "+maxTriangleCount*3);
-						MeshFilter localMeshFilter = MeshToBake.GetChild(0).GetComponent<MeshFilter>();
-						if (localMeshFilter != null)
+						MeshFilter localMeshFilter = meshToBake.GetChild(0).GetComponent<MeshFilter>();
+
+						if (localMeshFilter == null && meshToBake.GetChild(0).childCount > 0)
+						{
+							localMeshFilter = meshToBake.GetChild(0).GetChild(0).GetComponent<MeshFilter>();
+							//if (localMeshFilter != null)
+							//    Debug.Log("Found a submesh at " + 0);
+							//else
+							//    Debug.Log("Not found at " + 0);
+						}
+
+						if (localMeshFilter != null && localMeshFilter.sharedMesh.subMeshCount>0)
 						{
 							List<Vector3> local_vertices = new List<Vector3>(); 
 							localMeshFilter.sharedMesh.GetVertices(local_vertices);
@@ -440,14 +576,28 @@ public class ATV_Editor : EditorWindow
 									int vtxIndex = local_index[targetIndex];
 									newVertexPos = local_vertices[vtxIndex];
 									newVertexNrm = local_normals[vtxIndex];
+
+									if (FromBlender)
+									{
+										newVertexPos = localMeshFilter.transform.TransformPoint(newVertexPos);
+										newVertexNrm = localMeshFilter.transform.TransformDirection(newVertexNrm);
+									}
 								}
 
 								minBounds = Vector3.Min(minBounds, newVertexPos);
 								maxBounds = Vector3.Max(maxBounds, newVertexPos);
 
-								positionTexture.SetPixel(coordinates.x, coordinates.y, new Color(newVertexPos.x, newVertexPos.y, newVertexPos.z, 1.0f));	
-								normalTexture.SetPixel(coordinates.x, coordinates.y, new Color(newVertexNrm.x, newVertexNrm.y, newVertexNrm.z, 1.0f));	
-							}
+								float alpha = 1.0f;
+
+                                positionTexture.SetPixel(coordinates.x, coordinates.y, new Color(newVertexPos.x, newVertexPos.y, newVertexPos.z, alpha));
+                                if (!UnlitMesh)
+								{
+                                    newVertexNrm = newVertexNrm.normalized;
+                                    newVertexNrm = newVertexNrm * 0.5f + Vector3.one * 0.5f; // Encode to positive only values
+
+                                    normalTexture.SetPixel(coordinates.x, coordinates.y, new Color(newVertexNrm.x, newVertexNrm.y, newVertexNrm.z, 1.0f));
+                                }
+                            }
 
 						}
 					}
@@ -455,9 +605,14 @@ public class ATV_Editor : EditorWindow
 					{
 						Debug.Log("Doing animated solid meshes ");
 						verticesOffset = 0;
-						for(int i=0;i<MeshToBake.childCount;i++)
+						for(int i=0;i<meshToBake.childCount;i++)
 						{
-							MeshFilter localMeshFilter = MeshToBake.GetChild(i).GetComponent<MeshFilter>();
+							MeshFilter localMeshFilter = meshToBake.GetChild(i).GetComponent<MeshFilter>();
+							if (localMeshFilter == null && meshToBake.GetChild(i).childCount > 0)
+							{
+								localMeshFilter = meshToBake.GetChild(i).GetChild(0).GetComponent<MeshFilter>();
+							}
+							
 							if (localMeshFilter != null)
 							{
 								List<Vector3> local_vertices = new List<Vector3>(); 
@@ -478,16 +633,28 @@ public class ATV_Editor : EditorWindow
 									uv2[targetIndex] = uvCoord;
 
 									Vector3 newVertexPos = local_vertices[j];
+									Vector3 newVertexNrm = local_normals[j];
+
+									if (FromBlender)
+									{
+										newVertexPos = localMeshFilter.transform.TransformPoint(newVertexPos);
+										newVertexNrm = localMeshFilter.transform.TransformDirection(newVertexNrm);
+									}
+
 									Vector3 refVertexPos = vertices[targetIndex];
 									newVertexPos -= refVertexPos;
-									Vector3 newVertexNrm = local_normals[j];
 
 									minBounds = Vector3.Min(minBounds, newVertexPos);
 									maxBounds = Vector3.Max(maxBounds, newVertexPos);
 
 									positionTexture.SetPixel(coordinates.x, coordinates.y, new Color(newVertexPos.x, newVertexPos.y, newVertexPos.z, 1.0f));	
-									normalTexture.SetPixel(coordinates.x, coordinates.y, new Color(newVertexNrm.x, newVertexNrm.y, newVertexNrm.z, 1.0f));	
-								}
+									if (!UnlitMesh)
+									{
+										newVertexNrm = newVertexNrm.normalized;
+										newVertexNrm = newVertexNrm * 0.5f + Vector3.one * 0.5f; // Encode to positive only values
+                                        normalTexture.SetPixel(coordinates.x, coordinates.y, new Color(newVertexNrm.x, newVertexNrm.y, newVertexNrm.z, 1.0f));
+                                    }
+                                }
 								verticesOffset += local_vertices.Count;
 							}
 						}
@@ -502,27 +669,33 @@ public class ATV_Editor : EditorWindow
 				bakedMesh.bounds = newBounds;
 
 				positionTexture.Apply();
-				normalTexture.Apply();
+				if (!UnlitMesh)
+					normalTexture.Apply();
 
-				Debug.Log("Saving positions texture asset at "+finalExportPath+ExportFilename+"_position.asset");
+                Debug.Log("Saving positions texture asset at "+finalExportPath+ExportFilename+"_position.asset");
 				AssetDatabase.CreateAsset(positionTexture,finalExportPath+ExportFilename+"_position.asset" );
 				AssetDatabase.SaveAssets();
-				Debug.Log("Saving normals texture asset at "+finalExportPath+ExportFilename+"_normal.asset");
-				AssetDatabase.CreateAsset(normalTexture,finalExportPath+ExportFilename+"_normal.asset" );
-				AssetDatabase.SaveAssets();
+				if (!UnlitMesh)
+				{
+                    Debug.Log("Saving normals texture asset at " + finalExportPath + ExportFilename + "_normal.asset");
+                    AssetDatabase.CreateAsset(normalTexture, finalExportPath + ExportFilename + "_normal.asset");
+                    AssetDatabase.SaveAssets();
+                }
 
-				bakedMesh.uv2 = uv2;
+                bakedMesh.uv2 = uv2;
 			}
 
-			Debug.Log("Saving merged mesh asset at "+finalExportPath+ExportFilename+"_mesh.asset");
+
+
+            Debug.Log("Saving merged mesh asset at "+finalExportPath+ExportFilename+"_mesh.asset");
 			AssetDatabase.CreateAsset(bakedMesh,finalExportPath+ExportFilename+"_mesh.asset" );
 			AssetDatabase.SaveAssets();
-			yield return null;			
+			yield return null;
 
-			Debug.Log("Create prefab");
+            Debug.Log("Create prefab");
 
 			Debug.Log("Saving material asset");
-			Material newMaterial = new Material(ReferenceMaterial.shader);
+			Material newMaterial = new Material(UnlitMesh? UnlitReferenceShader : ReferenceShader);
 			newMaterial.name = ExportFilename+"_material";
 			newMaterial.SetFloat("_Framecount", (float)framesCount);
 
